@@ -2,7 +2,7 @@
 
 # smos-dev
 
-`smos-dev.sh` is a small Docker wrapper for launching a persistent development container for a named workspace.
+`smos-dev.sh` is a small Docker wrapper for launching a persistent development container for a workspace path.
 
 It supports:
 
@@ -35,12 +35,15 @@ This command will:
 ## Usage
 
 ```bash
-./smos-dev.sh [--work NAME] [--profile NAME] [--network MODE] [--proxy URL]
+./smos-dev.sh [--work PATH] [--profile NAME] [--network MODE] [--proxy URL]
 ```
 
 Options:
 
-- `--work NAME`: workspace name, default `work`
+- `--work PATH`: workspace path, default `work`
+  - `/some/dir/foo` stays absolute
+  - `~/my/dir/foo` expands from your home directory
+  - `foo` and `foo/bar` are treated as relative to `SMOS_DEV_HOST_ROOT` and default to `$HOME/foo` and `$HOME/foo/bar`
 - `--profile NAME`: profile key for container naming and saved image state
 - `--network MODE`: one of `default`, `none`, or `proxy-only`
 - `--proxy URL`: proxy URL used with `--network proxy-only`
@@ -49,7 +52,7 @@ Options:
 ## Environment Variables
 
 - `SMOS_DEV_CONTAINER_USER`: in-container username; defaults to `USER`, then `id -un`
-- `SMOS_DEV_HOST_ROOT`: host workspace root; defaults to `$HOME/code`
+- `SMOS_DEV_HOST_ROOT`: base directory for relative work paths; defaults to `$HOME`
 - `SMOS_DEV_CONTAINER_ROOT`: container workspace root; defaults to `/workspace`
 - `SMOS_DEV_NETWORK_MODE`: default network mode
 - `SMOS_DEV_PROFILE`: default profile; otherwise the first Dockerfile `FROM` image is used
@@ -61,16 +64,22 @@ Options:
 
 ## Examples
 
-Use the default profile and workspace:
+Use the default profile and a relative workspace path:
 
 ```bash
 ./smos-dev.sh --work api
 ```
 
-Use a custom profile name:
+Use a home-relative workspace path:
 
 ```bash
-./smos-dev.sh --profile debian:13.1 --work api
+./smos-dev.sh --work ~/code/my-project
+```
+
+Use an absolute workspace path with a custom profile name:
+
+```bash
+./smos-dev.sh --profile debian:13.1 --work /srv/dev/api
 ```
 
 Use proxy-oriented networking:
@@ -89,16 +98,16 @@ SMOS_DEV_CONTAINER_ROOT="/projects" \
 
 ## How State Works
 
-The script stores the last committed image tag per profile and workspace:
+The script stores the last committed image tag per profile and workspace slug:
 
 ```text
-${XDG_STATE_HOME:-$HOME/.local/state}/smos-dev/<profile-slug>--<work>.image_tag
+${XDG_STATE_HOME:-$HOME/.local/state}/smos-dev/<profile-slug>--<work-slug>.image_tag
 ```
 
 For example:
 
 ```text
-~/.local/state/smos-dev/ubuntu-latest--api.image_tag
+~/.local/state/smos-dev/ubuntu-latest--code-my-project-<hash>.image_tag
 ```
 
 That means these do not collide:
@@ -111,13 +120,13 @@ That means these do not collide:
 Containers are named like this:
 
 ```text
-smos-dev-<profile-slug>-<work>
+smos-dev-<profile-slug>-<work-slug>
 ```
 
 Examples:
 
-- `smos-dev-ubuntu-latest-api`
-- `smos-dev-debian-13.1-api`
+- `smos-dev-ubuntu-latest-code-my-project-<hash>`
+- `smos-dev-debian-13.1-srv-dev-api-<hash>`
 
 ## Networking
 

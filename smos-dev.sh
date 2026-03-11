@@ -7,12 +7,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE_DIR="${DOCKERFILE_DIR:-$SCRIPT_DIR}"
 HOST_USER="${USER:-$(id -un)}"
 CONTAINER_USER="${SMOS_DEV_CONTAINER_USER:-${DEVBOX_CONTAINER_USER:-$HOST_USER}}"
-BASE_HOST_DIR="${SMOS_DEV_HOST_ROOT:-${DEVBOX_HOST_ROOT:-${HOME}/code}}"
+BASE_HOST_DIR="${SMOS_DEV_HOST_ROOT:-${DEVBOX_HOST_ROOT:-${HOME}}}"
 BASE_CONTAINER_DIR="${SMOS_DEV_CONTAINER_ROOT:-${DEVBOX_CONTAINER_ROOT:-/workspace}}"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/smos-dev"
 HOST_OS="$(uname -s)"
 
-WORK_NAME="work"   # default if not specified
+WORK_INPUT="work"   # default if not specified
 NETWORK_MODE="${SMOS_DEV_NETWORK_MODE:-${DEVBOX_NETWORK_MODE:-default}}"
 PROXY_URL="${SMOS_DEV_PROXY_URL:-${DEVBOX_PROXY_URL:-}}"
 PROFILE="${SMOS_DEV_PROFILE:-${DEVBOX_PROFILE:-}}"
@@ -40,14 +40,111 @@ sanitize_profile() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g'
 }
 
+trim_trailing_slashes() {
+  local path="$1"
+
+  while [[ "$path" != "/" && "$path" == */ ]]; do
+    path="${path%/}"
+  done
+
+  printf '%s\n' "$path"
+}
+
+resolve_work_host_path() {
+  local input="$1"
+  local resolved=""
+
+  case "$input" in
+    "~")
+      resolved="$HOME"
+      ;;
+    "~/"*)
+      resolved="${HOME}/${input#~/}"
+      ;;
+    /*)
+      resolved="$input"
+      ;;
+    *)
+      resolved="${BASE_HOST_DIR}/${input}"
+      ;;
+  esac
+
+  trim_trailing_slashes "$resolved"
+}
+
+derive_container_subpath() {
+  local host_path="$1"
+  local subpath=""
+
+  case "$host_path" in
+    "$HOME")
+      subpath="home"
+      ;;
+    "$HOME"/*)
+      subpath="${host_path#"$HOME"/}"
+      ;;
+    /)
+      subpath="root"
+      ;;
+    /*)
+      subpath="${host_path#/}"
+      ;;
+    *)
+      subpath="$host_path"
+      ;;
+  esac
+
+  if [[ -z "$subpath" ]]; then
+    subpath="work"
+  fi
+
+  printf '%s\n' "$subpath"
+}
+
+hash_string() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "$1" | sha256sum | awk '{print substr($1, 1, 12)}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 12)}'
+  else
+    printf '%s' "$1" | cksum | awk '{print $1}'
+  fi
+}
+
+sanitize_work_stem() {
+  local stem=""
+
+  stem="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
+
+  if [[ -z "$stem" ]]; then
+    stem="work"
+  fi
+
+  printf '%.48s\n' "$stem"
+}
+
+build_work_slug() {
+  local source="$1"
+  local stem=""
+  local suffix=""
+
+  stem="$(sanitize_work_stem "$source")"
+  suffix="$(hash_string "$source")"
+
+  printf '%s-%s\n' "$stem" "$suffix"
+}
+
 initialize_runtime_vars() {
   PROFILE="${PROFILE:-$(get_default_profile)}"
   PROFILE_SLUG="$(sanitize_profile "$PROFILE")"
+  WORK_HOST_PATH="$(resolve_work_host_path "$WORK_INPUT")"
+  WORK_CONTAINER_SUBPATH="$(derive_container_subpath "$WORK_HOST_PATH")"
+  WORK_SLUG="$(build_work_slug "$WORK_HOST_PATH")"
   IMAGE_NAME="${SMOS_DEV_IMAGE_NAME:-${DEVBOX_IMAGE_NAME:-smos-dev-${PROFILE_SLUG}:latest}}"
-  CONTAINER_NAME="smos-dev-${PROFILE_SLUG}-${WORK_NAME}"
-  HOST_DIR="${BASE_HOST_DIR}/${WORK_NAME}"
-  CONTAINER_DIR="${BASE_CONTAINER_DIR}/${WORK_NAME}"
-  STATE_FILE="${STATE_DIR}/${PROFILE_SLUG}--${WORK_NAME}.image_tag"
+  CONTAINER_NAME="smos-dev-${PROFILE_SLUG}-${WORK_SLUG}"
+  HOST_DIR="$WORK_HOST_PATH"
+  CONTAINER_DIR="${BASE_CONTAINER_DIR}/${WORK_CONTAINER_SUBPATH}"
+  STATE_FILE="${STATE_DIR}/${PROFILE_SLUG}--${WORK_SLUG}.image_tag"
 }
 
 require_option_value() {
@@ -79,12 +176,12 @@ get_platform_setup_line() {
 print_help() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--work NAME] [--profile NAME] [--network MODE] [--proxy URL] [--help]
+  $(basename "$0") [--work PATH] [--profile NAME] [--network MODE] [--proxy URL] [--help]
 
 Start or attach to a Docker development container for a named workspace.
 
 Options:
-  --work NAME       Workspace name. Default: '$WORK_NAME'
+  --work PATH       Workspace path. Default: '$WORK_INPUT'
   --profile NAME    Container profile. Default: '$PROFILE'
   --network MODE    default | none | proxy-only. Default: '$NETWORK_MODE'
   --proxy URL       Required with '--network proxy-only' unless SMOS_DEV_PROXY_URL is set.
@@ -92,7 +189,7 @@ Options:
 
 Environment:
   SMOS_DEV_CONTAINER_USER  In-container username. Default: USER / id -un
-  SMOS_DEV_HOST_ROOT       Host workspace root. Default: '${HOME}/code'
+  SMOS_DEV_HOST_ROOT       Base directory for relative work paths. Default: '${HOME}'
   SMOS_DEV_CONTAINER_ROOT  Container workspace root. Default: '/workspace'
   SMOS_DEV_NETWORK_MODE    Default network mode. Default: '$NETWORK_MODE'
   SMOS_DEV_PROFILE         Default profile. Default: first Dockerfile FROM image
@@ -104,7 +201,8 @@ Environment:
 
 Examples:
   $(basename "$0") --work api
-  $(basename "$0") --profile debian:13.1 --work api
+  $(basename "$0") --work ~/code/my-project
+  $(basename "$0") --profile debian:13.1 --work /srv/dev/api
   $(basename "$0") --network proxy-only --proxy http://127.0.0.1:8080 --work api
 
 Notes:
@@ -139,7 +237,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --work)
       require_option_value "--work" "${2:-}"
-      WORK_NAME="$2"
+      WORK_INPUT="$2"
       shift 2
       ;;
     *)
@@ -268,7 +366,7 @@ maybe_commit() {
   read -r -p "Save container changes so they persist? [y/N] " ans
   case "${ans,,}" in
     y|yes)
-      default_tag="${IMAGE_NAME%:*}:${WORK_NAME}-$(date +%Y%m%d-%H%M%S)"
+      default_tag="${IMAGE_NAME%:*}:${WORK_SLUG}-$(date +%Y%m%d-%H%M%S)"
       read -r -p "New image tag (default: ${default_tag}): " new_tag
       new_tag="${new_tag:-$default_tag}"
 
