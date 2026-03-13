@@ -7,23 +7,24 @@ I can't remember all the docker / podman commands. I just want a development env
 
 ## Overview
 
-`smos-dev.sh` is a small Docker wrapper for launching a persistent development container for a workspace path.
+`smos-dev.sh` is a small Docker/Podman wrapper for launching a persistent development container for a profile, with a selectable workspace mount.
 
 It supports:
 
 - profile-aware containers and image state
+- runtime-aware container and image state
 - Dockerfile-based image builds
-- one mounted workspace per container
-- optional image snapshotting with `docker commit`
+- one mounted workspace per container, replaceable by rerunning with a new `--work`
+- optional image snapshotting with `docker commit` or `podman commit`
 - basic network modes: `default`, `none`, and `proxy-only`
 - Linux and macOS host messaging
 
 ## Quick Start
 
-1. Install Docker.
-   Linux: Docker Engine.
-   macOS: Docker Desktop.
-2. Make sure the `docker` CLI works in your shell.
+1. Install Docker or Podman.
+   Linux: Docker Engine or Podman.
+   macOS: Docker Desktop or Podman Desktop.
+2. Make sure the chosen CLI works in your shell.
 3. Run:
 
 ```bash
@@ -33,14 +34,16 @@ It supports:
 This command will:
 
 - derive a default profile from the first `FROM` line in [`Dockerfile`](/Dockerfile)
+- pick a runtime if both `docker` and `podman` are installed and no runtime is already recorded
 - build an image if needed
 - create a host workspace directory if it does not already exist
-- create or reuse a container for that profile and workspace
+- create or reuse a container for that profile and runtime
+- recreate that container automatically when `--work` points to a different directory (mounts are immutable after container creation)
 
 ## Usage
 
 ```bash
-./smos-dev.sh [--work PATH] [--profile NAME] [--network MODE] [--proxy URL]
+./smos-dev.sh [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL]
 ```
 
 Options:
@@ -50,6 +53,7 @@ Options:
   - `~/my/dir/foo` expands from your home directory
   - `foo` and `foo/bar` are treated as relative to `SMOS_DEV_HOST_ROOT` and default to `$HOME/foo` and `$HOME/foo/bar`
 - `--profile NAME`: profile key for container naming and saved image state
+- `--runtime NAME`: one of `auto`, `docker`, or `podman`
 - `--network MODE`: one of `default`, `none`, or `proxy-only`
 - `--proxy URL`: proxy URL used with `--network proxy-only`
 - `--help`: print inline help
@@ -59,6 +63,7 @@ Options:
 - `SMOS_DEV_CONTAINER_USER`: in-container username; defaults to `USER`, then `id -un`
 - `SMOS_DEV_HOST_ROOT`: base directory for relative work paths; defaults to `$HOME`
 - `SMOS_DEV_CONTAINER_ROOT`: container workspace root; defaults to `/workspace`
+- `SMOS_DEV_RUNTIME`: default runtime; `auto`, `docker`, or `podman`
 - `SMOS_DEV_NETWORK_MODE`: default network mode
 - `SMOS_DEV_PROFILE`: default profile; otherwise the first Dockerfile `FROM` image is used
 - `SMOS_DEV_IMAGE_NAME`: override the built image tag
@@ -78,7 +83,7 @@ Use the default profile and a relative workspace path:
 Use a home-relative workspace path:
 
 ```bash
-./smos-dev.sh --work ~/code/my-project
+./smos-dev.sh --runtime podman --work ~/code/my-project
 ```
 
 Use an absolute workspace path with a custom profile name:
@@ -103,35 +108,56 @@ SMOS_DEV_CONTAINER_ROOT="/projects" \
 
 ## How State Works
 
-The script stores the last committed image tag per profile and workspace slug:
+The script stores the selected runtime per profile:
 
 ```text
-${XDG_STATE_HOME:-$HOME/.local/state}/smos-dev/<profile-slug>--<work-slug>.image_tag
+${XDG_STATE_HOME:-$HOME/.local/state}/smos-dev/<profile-slug>.runtime
+```
+
+It also stores the last committed image tag per runtime and profile:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/smos-dev/<profile-slug>.<runtime>.image_tag
+```
+
+And it stores the active workspace mount path per runtime and profile:
+
+```text
+${XDG_STATE_HOME:-$HOME/.local/state}/smos-dev/<profile-slug>.<runtime>.work_mount
 ```
 
 For example:
 
 ```text
-~/.local/state/smos-dev/ubuntu-latest--code-my-project-<hash>.image_tag
+~/.local/state/smos-dev/ubuntu-latest.runtime
+~/.local/state/smos-dev/ubuntu-latest.docker.image_tag
+~/.local/state/smos-dev/ubuntu-latest.docker.work_mount
 ```
 
 That means these do not collide:
 
+- `--profile ubuntu:latest`
+- `--profile debian:13.1`
+- `--runtime docker --profile ubuntu:latest`
+- `--runtime podman --profile ubuntu:latest`
+
+And these share the same profile container identity but change the mounted directory by recreating the container:
+
 - `--profile ubuntu:latest --work api`
-- `--profile debian:13.1 --work api`
+- `--profile ubuntu:latest --work ~/code/other-project`
 
 ## Container Naming
 
 Containers are named like this:
 
 ```text
-smos-dev-<profile-slug>-<work-slug>
+smos-dev-<profile-slug>
 ```
 
 Examples:
 
-- `smos-dev-ubuntu-latest-code-my-project-<hash>`
-- `smos-dev-debian-13.1-srv-dev-api-<hash>`
+- `smos-dev-ubuntu-latest`
+- `smos-dev-debian-13.1`
 
 ## Networking
 
@@ -139,7 +165,7 @@ Examples:
 
 Supported network modes:
 
-- `default`: standard Docker outbound networking
+- `default`: standard outbound networking for the selected runtime
 - `none`: disables container networking
 - `proxy-only`: sets `HTTP_PROXY` / `HTTPS_PROXY` inside the container for tools that honor them
 
@@ -149,12 +175,12 @@ Important: `proxy-only` is convenience configuration, not full egress enforcemen
 
 ### Linux
 
-- Works with the Docker CLI directly.
-- Isolation behavior depends on your Docker setup, kernel features, and any firewall rules you add.
+- Works with Docker or Podman.
+- Isolation behavior depends on your runtime setup, kernel features, and any firewall rules you add.
 
 ### macOS
 
-- Works through Docker Desktop’s Linux VM.
+- Works through Docker Desktop’s Linux VM or Podman machine.
 - The basic workflow is supported, but the host security model differs from Linux.
 - This repository does not attempt to define or enforce a macOS sandboxing model.
 

@@ -16,6 +16,8 @@ WORK_INPUT="work"   # default if not specified
 NETWORK_MODE="${SMOS_DEV_NETWORK_MODE:-${DEVBOX_NETWORK_MODE:-default}}"
 PROXY_URL="${SMOS_DEV_PROXY_URL:-${DEVBOX_PROXY_URL:-}}"
 PROFILE="${SMOS_DEV_PROFILE:-${DEVBOX_PROFILE:-}}"
+RUNTIME="${SMOS_DEV_RUNTIME:-${DEVBOX_RUNTIME:-auto}}"
+RUNTIME_CMD=""
 
 http_proxy="${HTTP_PROXY:-${http_proxy:-}}"
 https_proxy="${HTTPS_PROXY:-${https_proxy:-}}"
@@ -101,50 +103,24 @@ derive_container_subpath() {
   printf '%s\n' "$subpath"
 }
 
-hash_string() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    printf '%s' "$1" | sha256sum | awk '{print substr($1, 1, 12)}'
-  elif command -v shasum >/dev/null 2>&1; then
-    printf '%s' "$1" | shasum -a 256 | awk '{print substr($1, 1, 12)}'
-  else
-    printf '%s' "$1" | cksum | awk '{print $1}'
-  fi
-}
-
-sanitize_work_stem() {
-  local stem=""
-
-  stem="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9_.-]/-/g; s/-\{2,\}/-/g; s/^-//; s/-$//')"
-
-  if [[ -z "$stem" ]]; then
-    stem="work"
-  fi
-
-  printf '%.48s\n' "$stem"
-}
-
-build_work_slug() {
-  local source="$1"
-  local stem=""
-  local suffix=""
-
-  stem="$(sanitize_work_stem "$source")"
-  suffix="$(hash_string "$source")"
-
-  printf '%s-%s\n' "$stem" "$suffix"
-}
-
 initialize_runtime_vars() {
   PROFILE="${PROFILE:-$(get_default_profile)}"
   PROFILE_SLUG="$(sanitize_profile "$PROFILE")"
   WORK_HOST_PATH="$(resolve_work_host_path "$WORK_INPUT")"
   WORK_CONTAINER_SUBPATH="$(derive_container_subpath "$WORK_HOST_PATH")"
-  WORK_SLUG="$(build_work_slug "$WORK_HOST_PATH")"
   IMAGE_NAME="${SMOS_DEV_IMAGE_NAME:-${DEVBOX_IMAGE_NAME:-smos-dev-${PROFILE_SLUG}:latest}}"
-  CONTAINER_NAME="smos-dev-${PROFILE_SLUG}-${WORK_SLUG}"
+  CONTAINER_NAME="smos-dev-${PROFILE_SLUG}"
   HOST_DIR="$WORK_HOST_PATH"
   CONTAINER_DIR="${BASE_CONTAINER_DIR}/${WORK_CONTAINER_SUBPATH}"
-  STATE_FILE="${STATE_DIR}/${PROFILE_SLUG}--${WORK_SLUG}.image_tag"
+  STATE_BASENAME="${STATE_DIR}/${PROFILE_SLUG}"
+  RUNTIME_STATE_FILE="${STATE_BASENAME}.runtime"
+  IMAGE_STATE_FILE=""
+  WORK_STATE_FILE=""
+}
+
+set_runtime_state_paths() {
+  IMAGE_STATE_FILE="${STATE_BASENAME}.${RUNTIME}.image_tag"
+  WORK_STATE_FILE="${STATE_BASENAME}.${RUNTIME}.work_mount"
 }
 
 require_option_value() {
@@ -159,16 +135,148 @@ require_option_value() {
 
 initialize_runtime_vars
 
+runtime_installed() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+runtime_exists_in_state() {
+  [[ -f "$RUNTIME_STATE_FILE" ]]
+}
+
+read_runtime_state() {
+  cat "$RUNTIME_STATE_FILE"
+}
+
+write_runtime_state() {
+  printf '%s\n' "$RUNTIME" > "$RUNTIME_STATE_FILE"
+}
+
+write_work_state() {
+  cat > "$WORK_STATE_FILE" <<EOF
+${HOST_DIR}
+${CONTAINER_DIR}
+EOF
+}
+
+read_work_state() {
+  if [[ ! -f "$WORK_STATE_FILE" ]]; then
+    return 1
+  fi
+
+  mapfile -t WORK_STATE_VALUES < "$WORK_STATE_FILE"
+  WORK_STATE_HOST_DIR="${WORK_STATE_VALUES[0]:-}"
+  WORK_STATE_CONTAINER_DIR="${WORK_STATE_VALUES[1]:-}"
+}
+
+inspect_container_work_state() {
+  local mount_line=""
+
+  mount_line="$("$RUNTIME_CMD" inspect \
+    --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}|{{.Destination}}{{println}}{{end}}{{end}}' \
+    "$CONTAINER_NAME" 2>/dev/null | head -n1)"
+
+  if [[ -z "$mount_line" ]]; then
+    return 1
+  fi
+
+  INSPECT_WORK_HOST_DIR="${mount_line%%|*}"
+  INSPECT_WORK_CONTAINER_DIR="${mount_line#*|}"
+}
+
+container_uses_requested_workdir() {
+  WORK_STATE_HOST_DIR=""
+  WORK_STATE_CONTAINER_DIR=""
+  INSPECT_WORK_HOST_DIR=""
+  INSPECT_WORK_CONTAINER_DIR=""
+
+  if read_work_state; then
+    [[ "$WORK_STATE_HOST_DIR" == "$HOST_DIR" && "$WORK_STATE_CONTAINER_DIR" == "$CONTAINER_DIR" ]]
+    return
+  fi
+
+  if inspect_container_work_state; then
+    [[ "$INSPECT_WORK_HOST_DIR" == "$HOST_DIR" && "$INSPECT_WORK_CONTAINER_DIR" == "$CONTAINER_DIR" ]]
+    return
+  fi
+
+  return 1
+}
+
+set_runtime() {
+  RUNTIME="$1"
+  RUNTIME_CMD="$1"
+  set_runtime_state_paths
+}
+
+prompt_for_runtime() {
+  local answer=""
+
+  while true; do
+    read -r -p "Choose container runtime for new container [docker/podman]: " answer
+    case "${answer,,}" in
+      docker|podman)
+        set_runtime "${answer,,}"
+        return
+        ;;
+      *)
+        echo "Please enter 'docker' or 'podman'."
+        ;;
+    esac
+  done
+}
+
+select_runtime() {
+  local saved_runtime=""
+  local has_docker=0
+  local has_podman=0
+
+  if runtime_exists_in_state; then
+    saved_runtime="$(read_runtime_state)"
+
+    if [[ "$RUNTIME" != "auto" && "$RUNTIME" != "$saved_runtime" ]]; then
+      echo "Runtime mismatch for '$CONTAINER_NAME': state says '$saved_runtime', requested '$RUNTIME'."
+      exit 1
+    fi
+
+    set_runtime "$saved_runtime"
+    return
+  fi
+
+  if [[ "$RUNTIME" == "docker" || "$RUNTIME" == "podman" ]]; then
+    set_runtime "$RUNTIME"
+    return
+  fi
+
+  if runtime_installed docker; then
+    has_docker=1
+  fi
+
+  if runtime_installed podman; then
+    has_podman=1
+  fi
+
+  if (( has_docker == 1 && has_podman == 0 )); then
+    set_runtime docker
+  elif (( has_docker == 0 && has_podman == 1 )); then
+    set_runtime podman
+  elif (( has_docker == 1 && has_podman == 1 )); then
+    prompt_for_runtime
+  else
+    echo "Neither 'docker' nor 'podman' was found in PATH."
+    exit 1
+  fi
+}
+
 get_platform_setup_line() {
   case "$HOST_OS" in
     Darwin)
-      printf '%s\n' "Install Docker Desktop for Mac and ensure the 'docker' CLI works in your shell."
+      printf '%s\n' "Install Docker Desktop or Podman Desktop, then ensure the chosen CLI works in your shell."
       ;;
     Linux)
-      printf '%s\n' "Install Docker Engine and ensure your user can run 'docker'."
+      printf '%s\n' "Install Docker Engine or Podman, then ensure your user can run the chosen CLI."
       ;;
     *)
-      printf '%s\n' "Install a Docker-compatible runtime and ensure the 'docker' CLI works in your shell."
+      printf '%s\n' "Install Docker or Podman and ensure the chosen CLI works in your shell."
       ;;
   esac
 }
@@ -176,13 +284,14 @@ get_platform_setup_line() {
 print_help() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--work PATH] [--profile NAME] [--network MODE] [--proxy URL] [--help]
+  $(basename "$0") [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL] [--help]
 
-Start or attach to a Docker development container for a named workspace.
+Start or attach to a development container for a named workspace.
 
 Options:
   --work PATH       Workspace path. Default: '$WORK_INPUT'
   --profile NAME    Container profile. Default: '$PROFILE'
+  --runtime NAME    docker | podman | auto. Default: '$RUNTIME'
   --network MODE    default | none | proxy-only. Default: '$NETWORK_MODE'
   --proxy URL       Required with '--network proxy-only' unless SMOS_DEV_PROXY_URL is set.
   --help, -h        Show this help text and exit.
@@ -191,6 +300,7 @@ Environment:
   SMOS_DEV_CONTAINER_USER  In-container username. Default: USER / id -un
   SMOS_DEV_HOST_ROOT       Base directory for relative work paths. Default: '${HOME}'
   SMOS_DEV_CONTAINER_ROOT  Container workspace root. Default: '/workspace'
+  SMOS_DEV_RUNTIME         Default runtime. Default: '$RUNTIME'
   SMOS_DEV_NETWORK_MODE    Default network mode. Default: '$NETWORK_MODE'
   SMOS_DEV_PROFILE         Default profile. Default: first Dockerfile FROM image
   SMOS_DEV_IMAGE_NAME      Override built image tag. Default: '$IMAGE_NAME'
@@ -201,7 +311,7 @@ Environment:
 
 Examples:
   $(basename "$0") --work api
-  $(basename "$0") --work ~/code/my-project
+  $(basename "$0") --runtime podman --work ~/code/my-project
   $(basename "$0") --profile debian:13.1 --work /srv/dev/api
   $(basename "$0") --network proxy-only --proxy http://127.0.0.1:8080 --work api
 
@@ -223,6 +333,11 @@ while [[ $# -gt 0 ]]; do
     --profile)
       require_option_value "--profile" "${2:-}"
       PROFILE="$2"
+      shift 2
+      ;;
+    --runtime)
+      require_option_value "--runtime" "${2:-}"
+      RUNTIME="${2,,}"
       shift 2
       ;;
     --network)
@@ -249,24 +364,70 @@ done
 
 initialize_runtime_vars
 
+require_runtime_value() {
+  case "$RUNTIME" in
+    auto|docker|podman)
+      ;;
+    *)
+      echo "Invalid runtime: $RUNTIME"
+      echo "Supported values: auto, docker, podman"
+      exit 1
+      ;;
+  esac
+}
+
 ########################################
 # Image handling
 ########################################
-if [[ -f "$STATE_FILE" ]]; then
-  CURRENT_IMAGE="$(cat "$STATE_FILE")"
-else
-  CURRENT_IMAGE="$IMAGE_NAME"
-fi
+CURRENT_IMAGE=""
 
-image_exists_locally() {
-  docker image inspect "$1" >/dev/null 2>&1
+load_current_image() {
+  if [[ -f "$IMAGE_STATE_FILE" ]]; then
+    CURRENT_IMAGE="$(cat "$IMAGE_STATE_FILE")"
+  else
+    CURRENT_IMAGE="$IMAGE_NAME"
+  fi
 }
 
-require_docker() {
-  if ! command -v docker >/dev/null 2>&1; then
-    echo "docker is required but was not found in PATH"
+image_exists_locally() {
+  "$RUNTIME_CMD" image inspect "$1" >/dev/null 2>&1
+}
+
+require_runtime_installed() {
+  if ! runtime_installed "$RUNTIME_CMD"; then
+    echo "$RUNTIME_CMD is required but was not found in PATH"
     exit 1
   fi
+}
+
+runtime_ready() {
+  "$RUNTIME_CMD" info >/dev/null 2>&1
+}
+
+require_runtime_ready() {
+  if runtime_ready; then
+    return
+  fi
+
+  case "$RUNTIME_CMD:$HOST_OS" in
+    docker:Darwin)
+      echo "Docker is installed but not ready. Start Docker Desktop and try again."
+      ;;
+    docker:Linux)
+      echo "Docker is installed but not ready. Start the Docker daemon and ensure your user can access it."
+      ;;
+    podman:Darwin)
+      echo "Podman is installed but not ready. Start the Podman machine and try again."
+      ;;
+    podman:Linux)
+      echo "Podman is installed but not ready. Run 'podman info' to inspect the local setup."
+      ;;
+    *)
+      echo "$RUNTIME_CMD is installed but not ready. Run '$RUNTIME_CMD info' for details."
+      ;;
+  esac
+
+  exit 1
 }
 
 require_container_user() {
@@ -308,7 +469,7 @@ print_network_enforcement_note() {
     cat <<EOF
 Network mode 'proxy-only' is active.
 This exports proxy environment variables inside the container but does not block direct egress by itself.
-To enforce "proxy and DNS only", add host firewall rules for your Docker runtime.
+To enforce "proxy and DNS only", add host firewall rules for your container runtime.
 EOF
   fi
 }
@@ -328,10 +489,10 @@ ensure_image() {
     return
   fi
 
-  echo "Image '$CURRENT_IMAGE' not found locally."
+  echo "Image '$CURRENT_IMAGE' not found locally in $RUNTIME_CMD."
   echo "Building from Dockerfile in: $DOCKERFILE_DIR"
 
-  docker build \
+  "$RUNTIME_CMD" build \
     --build-arg "SMOS_DEV_USERNAME=$CONTAINER_USER" \
     -t "$IMAGE_NAME" \
     "$DOCKERFILE_DIR"
@@ -342,11 +503,11 @@ ensure_image() {
 # Container helpers
 ########################################
 container_exists() {
-  docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
+  "$RUNTIME_CMD" ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
 }
 
 container_running() {
-  docker ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
+  "$RUNTIME_CMD" ps --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"
 }
 
 ensure_host_dir() {
@@ -366,14 +527,14 @@ maybe_commit() {
   read -r -p "Save container changes so they persist? [y/N] " ans
   case "${ans,,}" in
     y|yes)
-      default_tag="${IMAGE_NAME%:*}:${WORK_SLUG}-$(date +%Y%m%d-%H%M%S)"
+      default_tag="${IMAGE_NAME%:*}:${PROFILE_SLUG}-$(date +%Y%m%d-%H%M%S)"
       read -r -p "New image tag (default: ${default_tag}): " new_tag
       new_tag="${new_tag:-$default_tag}"
 
-      echo "Committing container -> $new_tag"
-      docker commit "$CONTAINER_NAME" "$new_tag" >/dev/null
+      echo "Committing container via $RUNTIME_CMD -> $new_tag"
+      "$RUNTIME_CMD" commit "$CONTAINER_NAME" "$new_tag" >/dev/null
 
-      echo "$new_tag" > "$STATE_FILE"
+      printf '%s\n' "$new_tag" > "$IMAGE_STATE_FILE"
       echo "Saved. Future runs use: $new_tag"
       ;;
     *)
@@ -382,27 +543,65 @@ maybe_commit() {
   esac
 }
 
+recreate_container_for_work_change() {
+  local current_host=""
+  local current_container=""
+
+  current_host="${WORK_STATE_HOST_DIR:-$INSPECT_WORK_HOST_DIR}"
+  current_container="${WORK_STATE_CONTAINER_DIR:-$INSPECT_WORK_CONTAINER_DIR}"
+
+  if [[ -n "$current_host" || -n "$current_container" ]]; then
+    cat <<EOF
+Container '$CONTAINER_NAME' already exists with a different workspace mount.
+Current mount: ${current_host:-unknown} -> ${current_container:-unknown}
+Requested mount: ${HOST_DIR} -> ${CONTAINER_DIR}
+EOF
+  else
+    cat <<EOF
+Container '$CONTAINER_NAME' already exists and workspace mount metadata is unavailable.
+Requested mount: ${HOST_DIR} -> ${CONTAINER_DIR}
+EOF
+  fi
+
+  maybe_commit
+
+  if container_running; then
+    "$RUNTIME_CMD" stop "$CONTAINER_NAME" >/dev/null
+  fi
+
+  "$RUNTIME_CMD" rm "$CONTAINER_NAME" >/dev/null
+  write_work_state
+  run_new_container
+}
+
 run_new_container() {
-  local docker_args=(
+  local runtime_args=(
     -it
     --name "$CONTAINER_NAME"
-    -v "$HOST_DIR":"$CONTAINER_DIR"
     -e HOST_USER="$HOST_USER"
   )
 
+  if [[ "$RUNTIME_CMD" == "docker" ]]; then
+    runtime_args+=(--user "$(id -u):$(id -g)")
+    runtime_args+=(-v "$HOST_DIR":"$CONTAINER_DIR")
+  elif [[ "$RUNTIME_CMD" == "podman" ]]; then
+    runtime_args+=(--userns=keep-id)
+    runtime_args+=(-v "${HOST_DIR}:${CONTAINER_DIR}:Z,U")
+  fi
+
   case "$NETWORK_MODE" in
     none)
-      docker_args+=(--network none)
+      runtime_args+=(--network none)
       ;;
     proxy-only)
-      docker_args+=(
+      runtime_args+=(
         -e HTTP_PROXY="$PROXY_URL"
         -e HTTPS_PROXY="$PROXY_URL"
         -e http_proxy="$PROXY_URL"
         -e https_proxy="$PROXY_URL"
       )
       if [[ -n "$no_proxy" ]]; then
-        docker_args+=(
+        runtime_args+=(
           -e NO_PROXY="$no_proxy"
           -e no_proxy="$no_proxy"
         )
@@ -410,24 +609,25 @@ run_new_container() {
       ;;
   esac
 
-  echo "Creating container '$CONTAINER_NAME'"
+  echo "Creating container '$CONTAINER_NAME' with $RUNTIME_CMD"
   print_network_enforcement_note
-  docker run "${docker_args[@]}" "$CURRENT_IMAGE" /bin/bash
+  "$RUNTIME_CMD" run "${runtime_args[@]}" "$CURRENT_IMAGE" /bin/bash
 
   maybe_commit
 }
 
 start_existing_container() {
-  echo "Starting container '$CONTAINER_NAME'"
+  echo "Starting container '$CONTAINER_NAME' with $RUNTIME_CMD"
   print_existing_container_note
-  docker start -ai "$CONTAINER_NAME"
+  "$RUNTIME_CMD" start -ai "$CONTAINER_NAME"
   maybe_commit
 }
 
 open_running_container_shell() {
-  echo "Container already running. Opening new shell..."
+  echo "Container already running in $RUNTIME_CMD. Opening new shell..."
   print_existing_container_note
-  docker exec -it "$CONTAINER_NAME" /bin/bash
+  "$RUNTIME_CMD" exec -it "$CONTAINER_NAME" /bin/bash
+  maybe_commit
 }
 
 ########################################
@@ -435,18 +635,33 @@ open_running_container_shell() {
 ########################################
 require_container_user
 require_profile
+require_runtime_value
 require_valid_network_mode
 require_proxy_config
-require_docker
 ensure_host_dir
+select_runtime
+require_runtime_installed
+require_runtime_ready
+load_current_image
 ensure_image
 
 if container_exists; then
-  if container_running; then
-    open_running_container_shell
+  if ! runtime_exists_in_state; then
+    echo "Container state is incomplete. Missing runtime sidecar: $RUNTIME_STATE_FILE"
+    exit 1
+  fi
+
+  if container_uses_requested_workdir; then
+    if container_running; then
+      open_running_container_shell
+    else
+      start_existing_container
+    fi
   else
-    start_existing_container
+    recreate_container_for_work_change
   fi
 else
+  write_runtime_state
+  write_work_state
   run_new_container
 fi
