@@ -2,6 +2,11 @@
 
 # smos-dev
 
+## tl;dr
+I can't remember all the docker / podman commands. I just want a development environment that is simple, mostly secure, and is not a set of aliases in my shell. I don't need a constantly updated Dockerfile, I need to be able to use docker commit several times, then throw that image away when I'm done. This script solves that problem.
+
+## Overview
+
 `smos-dev.sh` is a small Docker wrapper for launching a persistent development container for a workspace path.
 
 It supports:
