@@ -5,18 +5,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DOCKERFILE_DIR="${DOCKERFILE_DIR:-$SCRIPT_DIR}"
+CONTAINERFILE_INPUT="${SMOS_DEV_CFILE:-Containerfile.ubuntu}"
+CONTAINERFILE_EXPLICIT=0
+CONTAINERFILE_PATH=""
 HOST_USER="${USER:-$(id -un)}"
-CONTAINER_USER="${SMOS_DEV_CONTAINER_USER:-${DEVBOX_CONTAINER_USER:-$HOST_USER}}"
-BASE_HOST_DIR="${SMOS_DEV_HOST_ROOT:-${DEVBOX_HOST_ROOT:-${HOME}}}"
-BASE_CONTAINER_DIR="${SMOS_DEV_CONTAINER_ROOT:-${DEVBOX_CONTAINER_ROOT:-/workspace}}"
+CONTAINER_USER="${SMOS_DEV_CONTAINER_USER:-$HOST_USER}"
+BASE_HOST_DIR="${SMOS_DEV_HOST_ROOT:-${HOME}}"
+BASE_CONTAINER_DIR="${SMOS_DEV_CONTAINER_ROOT:-/workspace}"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/smos-dev"
 HOST_OS="$(uname -s)"
 
 WORK_INPUT="work"   # default if not specified
-NETWORK_MODE="${SMOS_DEV_NETWORK_MODE:-${DEVBOX_NETWORK_MODE:-default}}"
-PROXY_URL="${SMOS_DEV_PROXY_URL:-${DEVBOX_PROXY_URL:-}}"
-PROFILE="${SMOS_DEV_PROFILE:-${DEVBOX_PROFILE:-}}"
-RUNTIME="${SMOS_DEV_RUNTIME:-${DEVBOX_RUNTIME:-auto}}"
+NETWORK_MODE="${SMOS_DEV_NETWORK_MODE:-default}"
+PROXY_URL="${SMOS_DEV_PROXY_URL:-}"
+PROFILE="${SMOS_DEV_PROFILE:-}"
+RUNTIME="${SMOS_DEV_RUNTIME:-auto}"
 RUNTIME_CMD=""
 
 http_proxy="${HTTP_PROXY:-${http_proxy:-}}"
@@ -24,11 +27,10 @@ https_proxy="${HTTPS_PROXY:-${https_proxy:-}}"
 no_proxy="${NO_PROXY:-${no_proxy:-}}"
 
 get_default_profile() {
-  local dockerfile_path="${DOCKERFILE_DIR}/Dockerfile"
   local from_image=""
 
-  if [[ -f "$dockerfile_path" ]]; then
-    from_image="$(awk 'toupper($1) == "FROM" { print $2; exit }' "$dockerfile_path")"
+  if [[ -f "$CONTAINERFILE_PATH" ]]; then
+    from_image="$(awk 'toupper($1) == "FROM" { print $2; exit }' "$CONTAINERFILE_PATH")"
   fi
 
   if [[ -n "$from_image" ]]; then
@@ -36,6 +38,17 @@ get_default_profile() {
   else
     printf 'default\n'
   fi
+}
+
+resolve_containerfile_path() {
+  case "$CONTAINERFILE_INPUT" in
+    /*)
+      printf '%s\n' "$CONTAINERFILE_INPUT"
+      ;;
+    *)
+      printf '%s\n' "${DOCKERFILE_DIR}/${CONTAINERFILE_INPUT}"
+      ;;
+  esac
 }
 
 sanitize_profile() {
@@ -104,11 +117,12 @@ derive_container_subpath() {
 }
 
 initialize_runtime_vars() {
+  CONTAINERFILE_PATH="$(resolve_containerfile_path)"
   PROFILE="${PROFILE:-$(get_default_profile)}"
   PROFILE_SLUG="$(sanitize_profile "$PROFILE")"
   WORK_HOST_PATH="$(resolve_work_host_path "$WORK_INPUT")"
   WORK_CONTAINER_SUBPATH="$(derive_container_subpath "$WORK_HOST_PATH")"
-  IMAGE_NAME="${SMOS_DEV_IMAGE_NAME:-${DEVBOX_IMAGE_NAME:-smos-dev-${PROFILE_SLUG}:latest}}"
+  IMAGE_NAME="${SMOS_DEV_IMAGE_NAME:-smos-dev-${PROFILE_SLUG}:latest}"
   CONTAINER_NAME="smos-dev-${PROFILE_SLUG}"
   HOST_DIR="$WORK_HOST_PATH"
   CONTAINER_DIR="${BASE_CONTAINER_DIR}/${WORK_CONTAINER_SUBPATH}"
@@ -284,7 +298,7 @@ get_platform_setup_line() {
 print_help() {
   cat <<EOF
 Usage:
-  $(basename "$0") [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL] [--help]
+  $(basename "$0") [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL] [--cfile FILE] [--help]
 
 Start or attach to a development container for a named workspace.
 
@@ -294,6 +308,7 @@ Options:
   --runtime NAME    docker | podman | auto. Default: '$RUNTIME'
   --network MODE    default | none | proxy-only. Default: '$NETWORK_MODE'
   --proxy URL       Required with '--network proxy-only' unless SMOS_DEV_PROXY_URL is set.
+  --cfile FILE      Containerfile path. Default: '$CONTAINERFILE_INPUT'
   --help, -h        Show this help text and exit.
 
 Environment:
@@ -302,16 +317,17 @@ Environment:
   SMOS_DEV_CONTAINER_ROOT  Container workspace root. Default: '/workspace'
   SMOS_DEV_RUNTIME         Default runtime. Default: '$RUNTIME'
   SMOS_DEV_NETWORK_MODE    Default network mode. Default: '$NETWORK_MODE'
-  SMOS_DEV_PROFILE         Default profile. Default: first Dockerfile FROM image
+  SMOS_DEV_PROFILE         Default profile. Default: first selected container file FROM image
+  SMOS_DEV_CFILE           Default container file. Default: 'Containerfile.ubuntu'
   SMOS_DEV_IMAGE_NAME      Override built image tag. Default: '$IMAGE_NAME'
   SMOS_DEV_PROXY_URL       Default proxy URL
-  DEVBOX_*                Backward-compatible fallback environment variables
-  DOCKERFILE_DIR          Dockerfile directory. Default: script directory
+  DOCKERFILE_DIR          Container file directory. Default: script directory
   XDG_STATE_HOME          State root. Default: '${HOME}/.local/state'
 
 Examples:
   $(basename "$0") --work api
   $(basename "$0") --runtime podman --work ~/code/my-project
+  $(basename "$0") --cfile Containerfile.debian --work api
   $(basename "$0") --profile debian:13.1 --work /srv/dev/api
   $(basename "$0") --network proxy-only --proxy http://127.0.0.1:8080 --work api
 
@@ -348,6 +364,12 @@ while [[ $# -gt 0 ]]; do
     --proxy)
       require_option_value "--proxy" "${2:-}"
       PROXY_URL="$2"
+      shift 2
+      ;;
+    --cfile)
+      require_option_value "--cfile" "${2:-}"
+      CONTAINERFILE_INPUT="$2"
+      CONTAINERFILE_EXPLICIT=1
       shift 2
       ;;
     --work)
@@ -484,16 +506,30 @@ EOF
   fi
 }
 
+warn_ignored_containerfile() {
+  if (( CONTAINERFILE_EXPLICIT == 0 )); then
+    return
+  fi
+
+  cat <<EOF
+Container '$CONTAINER_NAME' already exists.
+Ignoring --cfile '$CONTAINERFILE_INPUT' because existing containers are started/attached, not rebuilt.
+Press Enter to continue or Ctrl-C to cancel.
+EOF
+  read -r
+}
+
 ensure_image() {
   if image_exists_locally "$CURRENT_IMAGE"; then
     return
   fi
 
   echo "Image '$CURRENT_IMAGE' not found locally in $RUNTIME_CMD."
-  echo "Building from Dockerfile in: $DOCKERFILE_DIR"
+  echo "Building from container file: $CONTAINERFILE_PATH"
 
   "$RUNTIME_CMD" build \
     --build-arg "SMOS_DEV_USERNAME=$CONTAINER_USER" \
+    -f "$CONTAINERFILE_PATH" \
     -t "$IMAGE_NAME" \
     "$DOCKERFILE_DIR"
   CURRENT_IMAGE="$IMAGE_NAME"
@@ -646,6 +682,8 @@ load_current_image
 ensure_image
 
 if container_exists; then
+  warn_ignored_containerfile
+
   if ! runtime_exists_in_state; then
     echo "Container state is incomplete. Missing runtime sidecar: $RUNTIME_STATE_FILE"
     exit 1

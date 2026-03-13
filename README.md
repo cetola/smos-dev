@@ -13,7 +13,7 @@ It supports:
 
 - profile-aware containers and image state
 - runtime-aware container and image state
-- Dockerfile-based image builds
+- Containerfile-based image builds (default `Containerfile.ubuntu`, override with `--cfile`)
 - one mounted workspace per container, replaceable by rerunning with a new `--work`
 - optional image snapshotting with `docker commit` or `podman commit`
 - basic network modes: `default`, `none`, and `proxy-only`
@@ -33,7 +33,7 @@ It supports:
 
 This command will:
 
-- derive a default profile from the first `FROM` line in [`Dockerfile`](/Dockerfile)
+- derive a default profile from the first `FROM` line in [`Containerfile.ubuntu`](/Containerfile.ubuntu) (or the file selected with `--cfile`)
 - pick a runtime if both `docker` and `podman` are installed and no runtime is already recorded
 - build an image if needed
 - create a host workspace directory if it does not already exist
@@ -43,7 +43,7 @@ This command will:
 ## Usage
 
 ```bash
-./smos-dev.sh [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL]
+./smos-dev.sh [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL] [--cfile FILE]
 ```
 
 Options:
@@ -56,6 +56,7 @@ Options:
 - `--runtime NAME`: one of `auto`, `docker`, or `podman`
 - `--network MODE`: one of `default`, `none`, or `proxy-only`
 - `--proxy URL`: proxy URL used with `--network proxy-only`
+- `--cfile FILE`: container file to build from; default `Containerfile.ubuntu`
 - `--help`: print inline help
 
 ## Environment Variables
@@ -65,11 +66,11 @@ Options:
 - `SMOS_DEV_CONTAINER_ROOT`: container workspace root; defaults to `/workspace`
 - `SMOS_DEV_RUNTIME`: default runtime; `auto`, `docker`, or `podman`
 - `SMOS_DEV_NETWORK_MODE`: default network mode
-- `SMOS_DEV_PROFILE`: default profile; otherwise the first Dockerfile `FROM` image is used
+- `SMOS_DEV_PROFILE`: default profile; otherwise the first selected container file `FROM` image is used
+- `SMOS_DEV_CFILE`: default container file name/path; defaults to `Containerfile.ubuntu`
 - `SMOS_DEV_IMAGE_NAME`: override the built image tag
 - `SMOS_DEV_PROXY_URL`: default proxy URL
-- `DEVBOX_*`: backward-compatible fallback environment variables
-- `DOCKERFILE_DIR`: directory containing the `Dockerfile`
+- `DOCKERFILE_DIR`: directory containing container files; defaults to the script directory
 - `XDG_STATE_HOME`: base state directory; defaults to `$HOME/.local/state`
 
 ## Examples
@@ -84,6 +85,12 @@ Use a home-relative workspace path:
 
 ```bash
 ./smos-dev.sh --runtime podman --work ~/code/my-project
+```
+
+Use an alternate container file:
+
+```bash
+./smos-dev.sh --cfile Containerfile.debian --work api
 ```
 
 Use an absolute workspace path with a custom profile name:
@@ -105,6 +112,11 @@ SMOS_DEV_HOST_ROOT="$HOME/src" \
 SMOS_DEV_CONTAINER_ROOT="/projects" \
 ./smos-dev.sh --work api
 ```
+
+Container file note:
+
+- `--cfile` only affects image build selection when creating/rebuilding images.
+- If the target container already exists, `--cfile` is ignored and the script prompts: "Press Enter to continue or Ctrl-C to cancel."
 
 ## How State Works
 
