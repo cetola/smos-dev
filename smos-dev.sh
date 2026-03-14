@@ -579,6 +579,49 @@ maybe_commit() {
   esac
 }
 
+run_with_spinner() {
+  local message="$1"
+  shift
+
+  if [[ ! -t 1 ]]; then
+    echo "$message"
+    "$@"
+    return
+  fi
+
+  local frames='|/-\'
+  local i=0
+  local cmd_pid=0
+  local status=0
+  local output_file=""
+
+  output_file="$(mktemp "${TMPDIR:-/tmp}/smos-dev-spinner.XXXXXX")"
+
+  "$@" >"$output_file" 2>&1 &
+  cmd_pid=$!
+
+  while kill -0 "$cmd_pid" 2>/dev/null; do
+    printf '\r\033[K%s [%c]' "$message" "${frames:i%4:1}"
+    i=$((i + 1))
+    sleep 0.1
+  done
+
+  wait "$cmd_pid" || status=$?
+
+  if (( status == 0 )); then
+    printf '\r\033[K%s [done]\n' "$message"
+  else
+    printf '\r\033[K%s [failed]\n' "$message"
+  fi
+
+  if [[ -s "$output_file" ]]; then
+    cat "$output_file"
+  fi
+
+  rm -f "$output_file"
+  return "$status"
+}
+
 recreate_container_for_work_change() {
   local current_host=""
   local current_container=""
@@ -602,10 +645,12 @@ EOF
   maybe_commit
 
   if container_running; then
-    "$RUNTIME_CMD" stop "$CONTAINER_NAME" >/dev/null
+    run_with_spinner "Stopping container '$CONTAINER_NAME'" \
+      "$RUNTIME_CMD" stop "$CONTAINER_NAME"
   fi
 
-  "$RUNTIME_CMD" rm "$CONTAINER_NAME" >/dev/null
+  run_with_spinner "Removing container '$CONTAINER_NAME'" \
+    "$RUNTIME_CMD" rm "$CONTAINER_NAME"
   write_work_state
   run_new_container
 }
@@ -645,9 +690,11 @@ run_new_container() {
       ;;
   esac
 
-  echo "Creating container '$CONTAINER_NAME' with $RUNTIME_CMD"
   print_network_enforcement_note
-  "$RUNTIME_CMD" run "${runtime_args[@]}" "$CURRENT_IMAGE" /bin/bash
+  run_with_spinner "Creating container '$CONTAINER_NAME' with $RUNTIME_CMD" \
+    "$RUNTIME_CMD" create "${runtime_args[@]}" "$CURRENT_IMAGE" /bin/bash
+  echo "Starting container '$CONTAINER_NAME' with $RUNTIME_CMD"
+  "$RUNTIME_CMD" start -ai "$CONTAINER_NAME"
 
   maybe_commit
 }
