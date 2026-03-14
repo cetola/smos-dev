@@ -15,7 +15,7 @@ BASE_CONTAINER_DIR="${SMOS_DEV_CONTAINER_ROOT:-/workspace}"
 STATE_DIR="${XDG_STATE_HOME:-${HOME}/.local/state}/smos-dev"
 HOST_OS="$(uname -s)"
 
-WORK_INPUT="work"   # default if not specified
+WORK_INPUT="smos-dev"   # default if not specified
 NETWORK_MODE="${SMOS_DEV_NETWORK_MODE:-default}"
 PROXY_URL="${SMOS_DEV_PROXY_URL:-}"
 PROFILE="${SMOS_DEV_PROFILE:-}"
@@ -110,7 +110,7 @@ derive_container_subpath() {
   esac
 
   if [[ -z "$subpath" ]]; then
-    subpath="work"
+    subpath="smos-work"
   fi
 
   printf '%s\n' "$subpath"
