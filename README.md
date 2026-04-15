@@ -7,7 +7,7 @@ I can't remember all the docker / podman commands. I just want a development env
 
 ## Overview
 
-`smos-dev.sh` is a small Docker/Podman wrapper for launching a persistent development container for a profile, with a selectable workspace mount.
+`smos-dev` is a small Docker/Podman wrapper for launching a persistent development container for a profile, with a selectable workspace mount.
 
 It supports:
 
@@ -28,7 +28,7 @@ It supports:
 3. Run:
 
 ```bash
-./smos-dev.sh --work my-project
+./smos-dev --work my-project
 ```
 
 This command will:
@@ -40,10 +40,20 @@ This command will:
 - create or reuse a container for that profile and runtime
 - recreate that container automatically when `--work` points to a different directory (mounts are immutable after container creation)
 
+## Environment Setup
+
+To add `smos-dev` to your `PATH` and enable Bash autocompletion, source the setup script in your `~/.bashrc`:
+
+```bash
+source /path/to/smos-dev/env-setup.sh
+```
+
+Once enabled, you can run `smos-dev` from any directory and use the Tab key for flag and value completion.
+
 ## Usage
 
 ```bash
-./smos-dev.sh [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL] [--cfile FILE]
+./smos-dev [--work PATH] [--profile NAME] [--runtime NAME] [--network MODE] [--proxy URL] [--cfile FILE]
 ```
 
 Options:
@@ -78,31 +88,31 @@ Options:
 Use the default profile and a relative workspace path:
 
 ```bash
-./smos-dev.sh --work api
+./smos-dev --work api
 ```
 
 Use a home-relative workspace path:
 
 ```bash
-./smos-dev.sh --runtime podman --work ~/code/my-project
+./smos-dev --runtime podman --work ~/code/my-project
 ```
 
 Use an alternate container file:
 
 ```bash
-./smos-dev.sh --cfile Containerfile.debian --work api
+./smos-dev --cfile Containerfile.debian --work api
 ```
 
 Use an absolute workspace path with a custom profile name:
 
 ```bash
-./smos-dev.sh --profile debian:13.1 --work /srv/dev/api
+./smos-dev --profile debian:13.1 --work /srv/dev/api
 ```
 
 Use proxy-oriented networking:
 
 ```bash
-./smos-dev.sh --network proxy-only --proxy http://127.0.0.1:8080 --work api
+./smos-dev --network proxy-only --proxy http://127.0.0.1:8080 --work api
 ```
 
 Use custom host and container workspace roots:
@@ -110,7 +120,7 @@ Use custom host and container workspace roots:
 ```bash
 SMOS_DEV_HOST_ROOT="$HOME/src" \
 SMOS_DEV_CONTAINER_ROOT="/projects" \
-./smos-dev.sh --work api
+./smos-dev --work api
 ```
 
 Container file note:
@@ -173,7 +183,7 @@ Examples:
 
 ## Networking
 
-`smos-dev.sh` never publishes container ports by default.
+`smos-dev` never publishes container ports by default.
 
 Supported network modes:
 
