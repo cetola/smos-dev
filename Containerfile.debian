@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: MIT
+
+FROM debian:sid
+
+ENV DEBIAN_FRONTEND=noninteractive
+ARG SMOS_DEV_USERNAME
+
+# Install developer tools
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    vim \
+    git \
+    tmux \
+    curl \
+    wget \
+    iputils-ping \
+    net-tools \
+    sudo \
+    ca-certificates \
+    unzip \
+    less \
+    file \
+    pkg-config \
+    man-db \
+    bash-completion \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create user with UID/GID 1000
+RUN test -n "$SMOS_DEV_USERNAME" && \
+    groupadd -g 1000 "$SMOS_DEV_USERNAME" && \
+    useradd -m -u 1000 -g 1000 -s /bin/bash "$SMOS_DEV_USERNAME" && \
+    usermod -aG sudo "$SMOS_DEV_USERNAME" && \
+    echo "$SMOS_DEV_USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+WORKDIR /home/$SMOS_DEV_USERNAME
+
+USER $SMOS_DEV_USERNAME
+
+CMD ["/bin/bash"]
